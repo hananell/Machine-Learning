@@ -1,126 +1,173 @@
-# Israel Cohen, Hananel Hadad
-# 205812290, 313369183
-
-
-import os
 import torch
 import gcommand_dataset as gc
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import time
+
+start_time = time.time()
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # hyper parameters
-lr = 0.05
-trainEpochs = 13
+lr = 0.09
+epochs = 13
 batchSize = 32
+
+
+def plotMeasurement(title, trainMeasure, valMeasure):
+    epochsList = [i for i in range(epochs)]
+    plt.figure()
+    plt.title(f"model {title}")
+    plt.plot(epochsList, trainMeasure, label="Train")
+    plt.plot(epochsList, valMeasure, label="Validation")
+    plt.xlabel("Epochs")
+    plt.ylabel(title)
+    plt.locator_params(axis="x", integer=True, tight=True)  # make x axis to display only whole number (iterations)
+    plt.legend()
+    plt.savefig(f"model {title}.png")
 
 
 class myModel(nn.Module):
     def __init__(self):
         super(myModel, self).__init__()
         self.layer0 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=4, kernel_size=1),
-            nn.BatchNorm2d(4),
+            nn.Conv2d(in_channels=1, out_channels=4, kernel_size=(1,1)),
             nn.ReLU(),
+            nn.BatchNorm2d(4),
+
         )
         self.layer1 = nn.Sequential(
-            nn.Conv2d(in_channels=4, out_channels=8, kernel_size=3),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(in_channels=4, out_channels=16, kernel_size=(3,3)),
             nn.ReLU(),
+            nn.BatchNorm2d(16),
             nn.MaxPool2d(kernel_size=2, stride=2),
+
         )
         self.layer2 = nn.Sequential(
-            nn.Conv2d(in_channels=8, out_channels=32, kernel_size=5),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(in_channels=16, out_channels=64, kernel_size=(3,3)),
             nn.ReLU(),
+            nn.BatchNorm2d(64),
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
         self.layer3 = nn.Sequential(
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=7),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=(3,3)),
             nn.ReLU(),
+            nn.BatchNorm2d(128),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.layer4 = nn.Sequential(
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=(3,3)),
+            nn.ReLU(),
+            nn.BatchNorm2d(256),
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
 
-        self.fc1 = nn.Linear(7680, 400)
-        self.fc2 = nn.Linear(400, 30)
+        self.fc1 = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(8192, 600),
+            nn.ReLU(),
+            nn.Dropout(),
+        )
+        self.fc2 = nn.Linear(600, 30)
 
     def forward(self, x):
         x = self.layer0(x)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
+        x = self.layer4(x)
         x = x.view(x.size(0), -1)
-        #print(x.shape)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return torch.nn.functional.log_softmax(x, -1)
+        # print(x.size())
+        x = self.fc1(x)
+        x = self.fc2(x)
+        return nn.functional.log_softmax(x, -1)
 
 
-def train(model, dataset):
+def train():
     model.train()
-    trainLoader = torch.utils.data.DataLoader(dataset, batch_size=batchSize, shuffle=True)
-    for sample, label in trainLoader:
-        optimizer.zero_grad()
-        output = model(sample)
-        loss = F.nll_loss(output, label)
+    trainLoss, trainAccuracy = 0., 0.
+    loop = tqdm(trainLoader, total=len(trainLoader), leave=False, desc=f"epoch {epoch} train: ")
+    for X, Y in loop:
+        X, Y = X.to(device), Y.to(device)
+        # predict and train
+        output = model(X)
+        loss = F.nll_loss(output, Y)
         loss.backward()
         optimizer.step()
+        optimizer.zero_grad()
+        # save measurements. multiply by number of sample in the batch
+        trainLoss += loss.item() * len(X)
+        y_pred = output.argmax(1)
+        trainAccuracy += (y_pred == Y).float().mean().item() * len(X)
+        # update tqdm description
+        loop.set_postfix_str(f"loss={loss.item():.3f}  accuracy={(y_pred == Y).float().mean().item():.3f}")
+    # divide measurements by number of samples overall
+    trainLoss /= len(trainData)
+    trainAccuracy /= len(trainData)
+    return trainLoss, trainAccuracy
 
 
-def test(model, data, classes):
+def validation():
     model.eval()
-    outputList = []
-    # predict to outputList
-    testLoader = torch.utils.data.DataLoader(data)
-    for i, (sample, label) in enumerate(testLoader):
-        output = model(sample)
-        pred = output.max(1, keepdim=True)[1]
-        predClass = classes[pred]
-        fileName = os.path.basename(data.spects[i][0])
-        outputList.append(f"{fileName},{predClass}\n")
-    # sort and write
-    sortedOutput = sorted(outputList, key=lambda line: int(line.split('.')[0]))
-    with open('test_y', 'w') as file:
-        for line in sortedOutput:
-            file.write(line)
-
-
-def validate(model, validSet):
-    model.eval()
-    correct = 0
-    validation_loader = torch.utils.data.DataLoader(validSet, batch_size=batchSize, shuffle=True)
+    valLoss, valAccuracy = 0., 0.
     with torch.no_grad():
-        for sample, label in validation_loader:
-            output = model(sample)
-            prediction = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
-            correct += prediction.eq(label.view_as(prediction)).cpu().sum().item()
-    accuracy = correct / (len(validation_loader)*batchSize)
-    return accuracy
+        loop = tqdm(valLoader, total=len(valLoader), leave=False, desc=f"epoch {epoch} validation: ")
+        for X, Y in loop:
+            X, Y = X.to(device), Y.to(device)
+            output = model(X)
+            valLoss += F.nll_loss(output, Y).item() * len(X)
+            y_pred = output.argmax(1)
+            valAccuracy += (y_pred == Y).float().mean().item() * len(X)
+            loop.set_postfix_str(f"loss={F.nll_loss(output, Y).item() / len(X):.3f}  accuracy={(y_pred == Y).float().mean().item():.3f}")
+    valLoss /= len(valData)
+    valAccuracy /= len(valData)
+    return valLoss, valAccuracy
 
 
-# get classes names out of all samples
-def getClasses(data):
-    classes = []
-    # add first class
-    firstClass = data[0][0].split('\\')[1]
-    classes.append(firstClass)
-    # for each file in data, if it's not like the previous, append it
-    for file in data:
-        curClass = file[0].split('\\')[1]
-        if curClass != classes[-1]:
-            classes.append(curClass)
-    return classes
+def test():
+    model.eval()
+    with open("../../Downloads/test_y", 'w') as f:
+        with torch.no_grad():
+            for spec, (x, y) in zip(testData.spects, testLoader):
+                x = x.to(device)
+                output = model(x)
+                y_pred = output.argmax(1)
+                fileName = spec[0].split('\\')[-1]
+                f.write(fileName + ',' + classes[y_pred] + "\n")
+
 
 if __name__ == '__main__':
-    # read data, make model
-    trainData = gc.GCommandLoader('train')
-    testData = gc.GCommandLoader('test')
-    classes = getClasses(trainData.spects)
+    # prepare gcommands
+    trainData = gc.GCommandLoader('./gcommands/train')
+    trainLoader = DataLoader(trainData, batch_size=batchSize, shuffle=True)
+    valData = gc.GCommandLoader('./gcommands/valid')
+    valLoader = DataLoader(valData, batch_size=batchSize, shuffle=True)
+    testData = gc.GCommandLoader('./gcommands/test2')
+    # testData.spects = sorted(testData.spects, key=lambda x: int(x[0].split('\\')[-1][:-4]))
+    testLoader = DataLoader(testData)
+    classes = trainData.classes
+    # prepare model
+    model = myModel().to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
-    model1 = myModel()
-    optimizer = torch.optim.SGD(model1.parameters(), lr=lr)
+    # train and validation
+    trainLosses, trainAccuracies, valLosses, valAccuracies = [], [], [], []
+    for epoch in range(epochs):
+        trainLoss, trainAccuracy = train()
+        valLoss, valAccuracy = validation()
+        trainLosses.append(trainLoss)
+        trainAccuracies.append(trainAccuracy)
+        valLosses.append(valLoss)
+        valAccuracies.append(valAccuracy)
 
-    # train and test
-    for i in range(13):
-        train(model1, trainData)
-    test(model1, testData, classes)
+    # graphs
+    plotMeasurement("Loss", trainLosses, valLosses)
+    plotMeasurement("Accuracy", trainAccuracies, valAccuracies)
+
+    # test
+    test()
+
+    running_time = (float(time.time()) - float(start_time)) / 60
+    print(f"---- {running_time:.2f} minutes ---- " )
